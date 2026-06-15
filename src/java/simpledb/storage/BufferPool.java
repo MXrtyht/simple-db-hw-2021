@@ -8,8 +8,10 @@ import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
 import java.io.*;
-
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * BufferPool manages the reading and writing of pages into memory from
@@ -32,6 +34,11 @@ public class BufferPool {
     other classes. BufferPool should use the numPages argument to the
     constructor instead. */
     public static final int DEFAULT_PAGES = 50;
+    
+    private int numPages;
+    private AtomicLong globalTimestamp;
+    private ConcurrentHashMap<PageId, Page> pageMap;
+    private ConcurrentHashMap<PageId, Long> lastAccessMap;
 
     /**
      * Creates a BufferPool that caches up to numPages pages.
@@ -40,6 +47,17 @@ public class BufferPool {
      */
     public BufferPool(int numPages) {
         // some code goes here
+        if(numPages <= 0){
+            numPages = DEFAULT_PAGES;
+        }
+        this.numPages = numPages;
+        this.globalTimestamp = new AtomicLong(0);
+        this.pageMap = new ConcurrentHashMap<>(numPages);
+        this.lastAccessMap = new ConcurrentHashMap<>(numPages);
+    }
+
+    private Long getCurrentTime(){
+        return this.globalTimestamp.getAndIncrement();
     }
     
     public static int getPageSize() {
@@ -54,6 +72,26 @@ public class BufferPool {
     // THIS FUNCTION SHOULD ONLY BE USED FOR TESTING!!
     public static void resetPageSize() {
     	BufferPool.pageSize = DEFAULT_PAGE_SIZE;
+    }
+
+    private void evict(){
+        if (lastAccessMap.isEmpty()) {
+            return;
+        }
+        PageId lruId = null;
+        Long oldestTime = null;
+        
+        for (Map.Entry<PageId, Long> entry : lastAccessMap.entrySet()) {
+            PageId pageId = entry.getKey();
+            Long timestamp = entry.getValue();
+            
+            if (oldestTime == null || timestamp < oldestTime) {
+                oldestTime = timestamp;
+                lruId = pageId;
+            }
+        }
+        this.pageMap.remove(lruId);
+        this.lastAccessMap.remove(lruId);
     }
 
     /**
@@ -74,7 +112,25 @@ public class BufferPool {
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
-        return null;
+        Page page = this.pageMap.get(pid);
+
+        synchronized (this){
+            // 缓存命中
+            if(page != null) {
+                this.lastAccessMap.put(pid, this.getCurrentTime());
+                return page;
+            }
+            // 缓存未命中, 且空间满了, 要换出
+            if(this.pageMap.size() >= this.numPages){
+                this.evict();
+            }
+
+            // 再放入
+            page = Database.getCatalog().getDatabaseFile(pid.getTableId()).readPage(pid);
+            pageMap.put(pid, page);
+            this.lastAccessMap.put(pid, this.getCurrentTime());
+            return page;
+        }
     }
 
     /**
