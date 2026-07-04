@@ -9,6 +9,8 @@ import simpledb.transaction.TransactionId;
 
 import java.io.*;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -195,6 +197,22 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        // dbfile插入tuple, 然后将影响的页放入bufferpool
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(tableId);
+        List<Page> pg = dbFile.insertTuple(tid, t);
+        Iterator<Page> it = pg.iterator();
+        synchronized(this){
+            while(it.hasNext()){
+                if(this.pageMap.size() >= this.numPages){
+                    this.evict();
+                }
+                Page currentPage = it.next();
+                PageId pid = currentPage.getId();
+                currentPage.markDirty(true, tid);
+                this.pageMap.put(pid, currentPage);
+                this.lastAccessMap.put(pid, this.getCurrentTime());
+            }
+        }
     }
 
     /**
@@ -214,6 +232,19 @@ public class BufferPool {
         throws DbException, IOException, TransactionAbortedException {
         // some code goes here
         // not necessary for lab1
+        // dbfile删除tuple, 然后将影响的页从bufferpool里移除(如果存在)
+        PageId pid = t.getRecordId().getPageId();
+        DbFile dbFile = Database.getCatalog().getDatabaseFile(pid.getTableId());
+        
+        List<Page> pg = dbFile.deleteTuple(tid, t);
+        Iterator<Page> it = pg.iterator();
+        while(it.hasNext()){
+            Page page = it.next();
+            PageId pagePid = page.getId();
+            page.markDirty(true, tid);
+            this.pageMap.put(pagePid, page);
+            this.lastAccessMap.put(pagePid, this.getCurrentTime());
+        }
     }
 
     /**

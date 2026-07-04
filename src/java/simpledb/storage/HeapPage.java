@@ -253,7 +253,7 @@ public class HeapPage implements Page {
         // some code goes here
         // not necessary for lab1
         RecordId rid = t.getRecordId();
-        if(rid == null || rid.getPageId().equals(this.pid)){
+        if(rid == null || !rid.getPageId().equals(this.pid)){
             throw new DbException("tuple not on this page");
         }
 
