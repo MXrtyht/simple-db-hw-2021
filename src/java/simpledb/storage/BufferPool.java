@@ -124,7 +124,7 @@ public class BufferPool {
             }
             // 缓存未命中, 且空间满了, 要换出
             if(this.pageMap.size() >= this.numPages){
-                this.evict();
+                this.evictPage();
             }
 
             // 再放入
@@ -204,7 +204,7 @@ public class BufferPool {
         synchronized(this){
             while(it.hasNext()){
                 if(this.pageMap.size() >= this.numPages){
-                    this.evict();
+                    this.evictPage();
                 }
                 Page currentPage = it.next();
                 PageId pid = currentPage.getId();
@@ -255,7 +255,10 @@ public class BufferPool {
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
-
+        for (Map.Entry<PageId, Page> entry : pageMap.entrySet()) {
+            PageId pid = entry.getKey();
+            flushPage(pid);
+        }
     }
 
     /** Remove the specific page id from the buffer pool.
@@ -269,6 +272,10 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
+        if(this.pageMap.contains(pid)){
+            this.pageMap.remove(pid);
+            this.lastAccessMap.remove(pid);
+        }
     }
 
     /**
@@ -278,6 +285,12 @@ public class BufferPool {
     private synchronized  void flushPage(PageId pid) throws IOException {
         // some code goes here
         // not necessary for lab1
+        Page page = this.pageMap.get(pid);
+        if((page != null) && (page.isDirty() != null)){
+            DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
+            file.writePage(page);
+            page.markDirty(false, null);
+        }
     }
 
     /** Write all pages of the specified transaction to disk.
@@ -294,6 +307,30 @@ public class BufferPool {
     private synchronized  void evictPage() throws DbException {
         // some code goes here
         // not necessary for lab1
+        if (lastAccessMap.isEmpty()) {
+            return;
+        }
+        PageId lruId = null;
+        Long oldestTime = null;
+        
+        for (Map.Entry<PageId, Long> entry : lastAccessMap.entrySet()) {
+            PageId pageId = entry.getKey();
+            Long timestamp = entry.getValue();
+            
+            if (oldestTime == null || timestamp < oldestTime) {
+                oldestTime = timestamp;
+                lruId = pageId;
+            }
+        }
+        Page page = this.pageMap.get(lruId);
+        if(page.isDirty() != null){
+            try{
+                this.flushPage(lruId);
+            }catch(Exception e){
+                return ;
+            }
+        }
+        this.pageMap.remove(lruId);
+        this.lastAccessMap.remove(lruId);
     }
-
 }
