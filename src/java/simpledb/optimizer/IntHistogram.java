@@ -1,10 +1,20 @@
 package simpledb.optimizer;
 
+import java.util.Map;
+
 import simpledb.execution.Predicate;
 
 /** A class to represent a fixed-width histogram over a single integer-based field.
  */
 public class IntHistogram {
+    // how many buckets
+    private int buckets;
+    private int min;
+    private int max;
+    // bucket ranges
+    private int width;
+    private int[] bucket;
+    private int totalValues;
 
     /**
      * Create a new IntHistogram.
@@ -24,6 +34,25 @@ public class IntHistogram {
      */
     public IntHistogram(int buckets, int min, int max) {
     	// some code goes here
+        this.buckets = buckets;
+        this.min = min;
+        this.max = max;
+        this.width = ((max - min + 1) / this.buckets) + ((max - min + 1)%this.buckets == 0 ? 0 : 1) ;
+        this.bucket = new int[buckets];
+        this.totalValues = 0;
+    }
+
+    public int bucketIndex(int value){
+        int clampedValue = Math.max(min, Math.min(max, value));
+        return (clampedValue - min) / this.width;
+    }
+
+    public int bucketLeft(int bucketIndex){
+        return bucketIndex * this.width + this.min;
+    }
+
+    public int bucketRight(int bucketIndex){
+        return this.bucketLeft(bucketIndex) + this.width - 1 ;
     }
 
     /**
@@ -32,6 +61,58 @@ public class IntHistogram {
      */
     public void addValue(int v) {
     	// some code goes here
+        int index = bucketIndex(v);
+        if(index >= 0 && index < buckets){
+            this.bucket[bucketIndex(v)]++;
+            this.totalValues ++;
+        }
+    }
+
+    private double estimateEqual(int index){
+        int h = this.bucket[index];
+        int w = this.bucketRight(index) - this.bucketLeft(index) + 1;
+        return ((double)h / (double)w) / (double)this.totalValues;
+    }
+
+    private double estimateLessThan(int value, int index){
+        double selectity = 0.0;
+
+        if(value > this.max){
+            return 1.0;
+        }
+
+        // 当前桶中 < value 的部分
+        int b_left = bucketLeft(index);
+        int h = this.bucket[index];
+        int w = bucketRight(index) - bucketLeft(index) + 1;
+        selectity += ((double)(value - b_left) / (double)w) * ((double) h / (double)this.totalValues);
+
+        // 前面的所有桶
+        for(int i=0; i < index; i++){
+            selectity += (double) bucket[i] / this.totalValues;
+        }
+        return selectity;
+    }
+
+    private double estimateGreaterThan(int value, int index){
+        double selectity = 0.0;
+
+        if(value < this.min){
+            return 1.0;
+        }
+
+        // 当前桶中 > value 的部分
+        int b_right = bucketRight(index);
+        int h = this.bucket[index];
+        int w = bucketRight(index) - bucketLeft(index) + 1;
+
+        selectity += ((double)(b_right - value) / (double)w) * ((double) h / (double)this.totalValues);
+        // 后面所有桶
+        for(int i=index+1; i < buckets; i++){
+            selectity += (double) bucket[i] / this.totalValues;
+        }
+
+        return selectity;
     }
 
     /**
@@ -47,7 +128,26 @@ public class IntHistogram {
     public double estimateSelectivity(Predicate.Op op, int v) {
 
     	// some code goes here
-        return -1.0;
+        int index = bucketIndex(v);
+        double result;
+        switch (op) {
+            case EQUALS:
+                return this.estimateEqual(index);
+            case LESS_THAN:
+                return this.estimateLessThan(v, index);
+            case LESS_THAN_OR_EQ:
+                result = this.estimateLessThan(v, index) + this.estimateEqual(index);
+                return  result > 1.0 ? 1.0 : result;
+            case GREATER_THAN:
+                return this.estimateGreaterThan(v, index);
+            case GREATER_THAN_OR_EQ:
+                result = this.estimateGreaterThan(v, index) + this.estimateEqual(index);
+                return  result > 1.0 ? 1.0 : result;
+            case NOT_EQUALS:
+                return 1 - this.estimateEqual(index);
+            default:
+                return 0.0;
+        }
     }
     
     /**
@@ -61,7 +161,13 @@ public class IntHistogram {
     public double avgSelectivity()
     {
         // some code goes here
-        return 1.0;
+        if(this.totalValues == 0) return 1.0;
+
+        double totalSelectivity = 0;
+        for(int i=0; i<buckets; i++){
+            totalSelectivity += (double)bucket[i] / totalValues;
+        }
+        return (double)totalSelectivity / (double)buckets;
     }
     
     /**
@@ -69,6 +175,18 @@ public class IntHistogram {
      */
     public String toString() {
         // some code goes here
-        return null;
+        StringBuilder sb = new StringBuilder();
+        sb.append("IntHistogram(buckets=").append(buckets);
+        sb.append(", min=").append(min);
+        sb.append(", max=").append(max);
+        sb.append(", totalValues=").append(totalValues);
+        sb.append(")\n");
+        
+        for (int i = 0; i < buckets; i++) {
+            sb.append(String.format("  Bucket %d: [%d, %d] = %d\n", 
+                i, bucketLeft(i), bucketRight(i), bucket[i]));
+        }
+        
+        return sb.toString();
     }
 }
