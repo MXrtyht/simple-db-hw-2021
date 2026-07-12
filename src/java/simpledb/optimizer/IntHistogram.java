@@ -42,16 +42,16 @@ public class IntHistogram {
         this.totalValues = 0;
     }
 
-    public int bucketIndex(int value){
+    private int bucketIndex(int value){
         int clampedValue = Math.max(min, Math.min(max, value));
         return (clampedValue - min) / this.width;
     }
 
-    public int bucketLeft(int bucketIndex){
+    private int bucketLeft(int bucketIndex){
         return bucketIndex * this.width + this.min;
     }
 
-    public int bucketRight(int bucketIndex){
+    private int bucketRight(int bucketIndex){
         return this.bucketLeft(bucketIndex) + this.width - 1 ;
     }
 
