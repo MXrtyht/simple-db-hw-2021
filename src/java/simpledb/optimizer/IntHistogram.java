@@ -42,9 +42,15 @@ public class IntHistogram {
         this.totalValues = 0;
     }
 
+    /**
+     * 返回此值所在的桶的索引
+     * 如果越界 则返回负一
+     * @param value
+     * @return
+     */
     private int bucketIndex(int value){
-        int clampedValue = Math.max(min, Math.min(max, value));
-        return (clampedValue - min) / this.width;
+        if(value < min || value > max ) return -1;
+        return (value - min) / this.width;
     }
 
     private int bucketLeft(int bucketIndex){
@@ -62,7 +68,7 @@ public class IntHistogram {
     public void addValue(int v) {
     	// some code goes here
         int index = bucketIndex(v);
-        if(index >= 0 && index < buckets){
+        if(index != -1){
             this.bucket[bucketIndex(v)]++;
             this.totalValues ++;
         }
@@ -129,6 +135,13 @@ public class IntHistogram {
 
     	// some code goes here
         int index = bucketIndex(v);
+        if(index == -1){
+            if(v > max){
+                return (op == Predicate.Op.LESS_THAN || op == Predicate.Op.LESS_THAN_OR_EQ || op == Predicate.Op.NOT_EQUALS) ? 1.0 : 0.0;
+            } else {
+                return (op == Predicate.Op.GREATER_THAN || op == Predicate.Op.GREATER_THAN_OR_EQ || op == Predicate.Op.NOT_EQUALS) ? 1.0 : 0.0;
+            }
+        }
         double result;
         switch (op) {
             case EQUALS:
