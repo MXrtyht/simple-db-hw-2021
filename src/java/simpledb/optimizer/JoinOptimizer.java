@@ -130,7 +130,7 @@ public class JoinOptimizer {
             // HINT: You may need to use the variable "j" if you implemented
             // a join algorithm that's more complicated than a basic
             // nested-loops join.
-            return -1.0;
+            return (double)(cost1 + card1 * cost2 + card1 * card2);
         }
     }
 
@@ -174,9 +174,21 @@ public class JoinOptimizer {
                                                    String field2PureName, int card1, int card2, boolean t1pkey,
                                                    boolean t2pkey, Map<String, TableStats> stats,
                                                    Map<String, Integer> tableAliasToId) {
-        int card = 1;
+        double rate = 0.3;
         // some code goes here
-        return card <= 0 ? 1 : card;
+        switch (joinOp) {
+            case EQUALS:
+                if (t1pkey && !t2pkey) {
+                    // 至少一方是主键，取较小值
+                    return Math.min(card1, card2);
+                } else {
+                    // 都不是主键，取较大值（启发式）
+                    return Math.max(card1, card2);
+                }
+            default:
+                // 范围连接，交叉乘积的 30%
+                return (int)(card1 * card2 * rate);
+        }
     }
 
     /**
