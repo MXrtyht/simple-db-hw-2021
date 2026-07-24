@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -41,6 +42,7 @@ public class BufferPool {
     private AtomicLong globalTimestamp;
     private ConcurrentHashMap<PageId, Page> pageMap;
     private ConcurrentHashMap<PageId, Long> lastAccessMap;
+    private ConcurrentHashMap<PageId, PageLock> pageLocks;
 
     /**
      * Creates a BufferPool that caches up to numPages pages.
@@ -56,6 +58,64 @@ public class BufferPool {
         this.globalTimestamp = new AtomicLong(0);
         this.pageMap = new ConcurrentHashMap<>(numPages);
         this.lastAccessMap = new ConcurrentHashMap<>(numPages);
+        this.pageLocks = new ConcurrentHashMap<>(numPages);
+    }
+
+    public static class PageLock{
+        public Set<TransactionId> shares = ConcurrentHashMap.newKeySet();
+        public TransactionId exclusive = null;
+
+        public boolean canGrant(TransactionId tid, Permissions perm){
+            boolean noExclusive = ((exclusive == null) || exclusive.equals(tid));
+            // 请求共享锁
+            if(perm == Permissions.READ_ONLY){
+                return noExclusive;
+            }
+            // 请求排他锁
+            boolean noShare = shares.size() == 0 || (shares.size() == 1 && shares.contains(tid));
+            return noExclusive && noShare;// 请求排他锁, 要同时没有排他锁和共享锁
+        }
+        public void grant(TransactionId tid, Permissions perm){
+            if(perm == Permissions.READ_ONLY){
+                if(exclusive != null && exclusive.equals(tid)){
+                    exclusive = null;
+                }
+                if(!shares.contains(tid)){
+                    shares.add(tid);
+                }
+            }else { // Permissions.READ_WRITE
+                if(shares.contains(tid)){
+                    shares.remove(tid);
+                }
+                exclusive = tid;
+            }
+        }
+        public void release(TransactionId tid){
+            if(exclusive != null && exclusive == tid){
+                exclusive = null;
+            }
+            if(shares.contains(tid)){
+                shares.remove(tid);
+            }
+        }
+        public boolean hasLock(TransactionId tid){
+            if(exclusive != null && exclusive == tid){
+                return true;
+            }
+            if(shares.contains(tid)){
+                return true;
+            }
+            return false;
+        }
+        public boolean isEmpty(){
+            if(exclusive != null){
+                return false;
+            }
+            if(shares.size() > 0){
+                return false;
+            }
+            return true;
+        }
     }
 
     private Long getCurrentTime(){
@@ -114,6 +174,14 @@ public class BufferPool {
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
+        synchronized(this){
+            PageLock lock = this.pageLocks.computeIfAbsent(pid, k -> new PageLock());
+            if(!lock.canGrant(tid, perm)){
+                throw new TransactionAbortedException();
+            }
+            lock.grant(tid, perm);
+        }
+
         Page page = this.pageMap.get(pid);
 
         synchronized (this){
@@ -147,6 +215,10 @@ public class BufferPool {
     public  void unsafeReleasePage(TransactionId tid, PageId pid) {
         // some code goes here
         // not necessary for lab1|lab2
+        PageLock lock = this.pageLocks.get(pid);
+        if(lock != null){
+            lock.release(tid);
+        }
     }
 
     /**
@@ -163,7 +235,8 @@ public class BufferPool {
     public boolean holdsLock(TransactionId tid, PageId p) {
         // some code goes here
         // not necessary for lab1|lab2
-        return false;
+        PageLock lock = this.pageLocks.get(p);
+        return ((lock != null) &&lock.hasLock(tid));
     }
 
     /**
