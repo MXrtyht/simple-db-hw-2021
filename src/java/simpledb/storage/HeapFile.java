@@ -122,6 +122,8 @@ public class HeapFile implements DbFile {
                 pg.markDirty(true, tid);
                 resultList.add(pg);
                 break;
+            }else{
+                Database.getBufferPool().unsafeReleasePage(tid, pgId);
             }
         }
 
@@ -142,18 +144,16 @@ public class HeapFile implements DbFile {
         // not necessary for lab1
         ArrayList<Page> resultList = new ArrayList<>();
         int i ;
-        for(i=0; i<this.numPages(); i++){
-            RecordId rid = t.getRecordId();
-            PageId pgId = rid.getPageId();
-            HeapPage pg = (HeapPage)Database.getBufferPool().getPage(tid, pgId, Permissions.READ_WRITE);
+        RecordId rid = t.getRecordId();
+        PageId pgId = rid.getPageId();
+        HeapPage pg = (HeapPage)Database.getBufferPool().getPage(tid, pgId, Permissions.READ_WRITE);
 
-            try{
-                pg.deleteTuple(t);
-                pg.markDirty(true, tid);
-                resultList.add(pg);
-            }catch(Exception e){
-                continue;
-            }
+        try{
+            pg.deleteTuple(t);
+            pg.markDirty(true, tid);
+            resultList.add(pg);
+        }catch(Exception e){
+            ;
         }
         if(resultList.isEmpty()){
             throw new DbException("can not delete tuple");
