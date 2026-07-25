@@ -2,16 +2,21 @@ package simpledb.storage;
 
 import simpledb.common.Database;
 import simpledb.common.Permissions;
+import simpledb.storage.BufferPool.PageLock;
 import simpledb.common.DbException;
 import simpledb.common.DeadlockException;
 import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
 import java.io.*;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -43,6 +48,7 @@ public class BufferPool {
     private ConcurrentHashMap<PageId, Page> pageMap;
     private ConcurrentHashMap<PageId, Long> lastAccessMap;
     private ConcurrentHashMap<PageId, PageLock> pageLocks;
+    private final DeadLockChecker deadLockChecker;
 
     /**
      * Creates a BufferPool that caches up to numPages pages.
@@ -59,6 +65,7 @@ public class BufferPool {
         this.pageMap = new ConcurrentHashMap<>(numPages);
         this.lastAccessMap = new ConcurrentHashMap<>(numPages);
         this.pageLocks = new ConcurrentHashMap<>(numPages);
+        this.deadLockChecker = new DeadLockChecker();
     }
 
     public static class PageLock{
@@ -116,6 +123,105 @@ public class BufferPool {
             }
             return true;
         }
+
+        public List<TransactionId> waitAdd(TransactionId tid, Permissions perm){
+            List<TransactionId> holders = new ArrayList<>();
+            if(exclusive != null && !exclusive.equals(tid)){
+                holders.add(exclusive);
+            }
+            // 请求排他锁
+            if(perm == Permissions.READ_WRITE){
+                for(TransactionId t : shares){
+                    if(!t.equals(tid)){
+                        holders.add(t);
+                    }
+                }
+            }
+            return holders;
+        }
+    }
+
+    public class WaitTransaction {
+        public TransactionId tid;
+        public PageId pid;
+        public Permissions perm;
+
+        public WaitTransaction(TransactionId tid, PageId pid, Permissions perm){
+            this.tid = tid;
+            this.pid = pid;
+            this.perm = perm;
+        }
+    }
+
+    public class DeadLockChecker{
+        public final Set<WaitTransaction> waits = ConcurrentHashMap.newKeySet();
+
+        // BFS
+        public synchronized TransactionId isDeadLock(){
+            Map<TransactionId, List<TransactionId>> graph = new HashMap<>();
+            Map<TransactionId, Integer> inDegree = new HashMap<>();
+
+            for (WaitTransaction wait : waits) {
+                graph.put(wait.tid, new ArrayList<>());
+                inDegree.put(wait.tid, 0);
+            }
+
+            // build graph
+            for(WaitTransaction wait : waits){
+                PageLock lock = pageLocks.get(wait.pid);
+                // 没有锁
+                if(lock == null){
+                    continue;
+                }
+                // 这个事务要获取的页面的锁还没拿到, 查看有谁在持有
+                if(!lock.canGrant(wait.tid, wait.perm)){
+                    for(TransactionId holder : lock.waitAdd(wait.tid, wait.perm)){
+                        if(graph.get(wait.tid) == null){
+                            graph.put(wait.tid, new ArrayList<>());
+                            inDegree.put(wait.tid, 0);
+                        }
+                        graph.get(wait.tid).add(holder);
+                        inDegree.put(holder, inDegree.getOrDefault(holder, 0) + 1);
+                        if(graph.get(holder) == null){
+                            graph.put(holder, new ArrayList<>());
+                        }
+                    }
+                }
+            }
+
+            // 拓扑排序
+            Queue<TransactionId> q = new ArrayDeque<>();
+            for(Map.Entry<TransactionId, Integer> entry : inDegree.entrySet()){
+                TransactionId tid = entry.getKey();
+                Integer count = entry.getValue();
+                if(count.equals(0)){
+                    q.add(tid);
+                }
+            }
+
+            Integer counter = 0;
+            TransactionId result = null;
+            while(!q.isEmpty()){
+                TransactionId currentTid = q.poll();
+                if(currentTid!=null){
+                    counter ++;
+                }
+                List<TransactionId> pointerTo = graph.get(currentTid);
+                for(TransactionId tid: pointerTo){
+                    inDegree.put(tid, inDegree.get(tid)-1);
+                    if(inDegree.get(tid).equals(0)){
+                        q.add(tid);
+                    }
+                }
+            }
+            // 如果有环 则取出一个环中的事务
+            for(Map.Entry<TransactionId, Integer> entry : inDegree.entrySet()){
+                if(entry.getValue() > 0){
+                    result = entry.getKey();
+                }
+            }
+            return result;
+        }
     }
 
     private Long getCurrentTime(){
@@ -136,9 +242,9 @@ public class BufferPool {
     	BufferPool.pageSize = DEFAULT_PAGE_SIZE;
     }
 
-    private void evict(){
+    private PageId findAnyLruId(){
         if (lastAccessMap.isEmpty()) {
-            return;
+            return null;
         }
         PageId lruId = null;
         Long oldestTime = null;
@@ -152,9 +258,11 @@ public class BufferPool {
                 lruId = pageId;
             }
         }
-        this.pageMap.remove(lruId);
-        this.lastAccessMap.remove(lruId);
+        return lruId;
     }
+
+    private final static long MAX_TRANSACTION_TIME = 30000; // ms
+    private final static int WAIT_EPOCH = 100; // ms
 
     /**
      * Retrieve the specified page with the associated permissions.
@@ -174,11 +282,49 @@ public class BufferPool {
     public  Page getPage(TransactionId tid, PageId pid, Permissions perm)
         throws TransactionAbortedException, DbException {
         // some code goes here
-        synchronized(this){
-            PageLock lock = this.pageLocks.computeIfAbsent(pid, k -> new PageLock());
-            if(!lock.canGrant(tid, perm)){
-                throw new TransactionAbortedException();
+        // synchronized(this){
+        //     PageLock lock = this.pageLocks.computeIfAbsent(pid, k -> new PageLock());
+        //     if(!lock.canGrant(tid, perm)){
+        //         // TODO waiting and acquire
+        //         // throw new TransactionAbortedException();
+        //         while(true){
+
+        //             Thread.sleep(10);
+        //         }
+        //     }
+        //     lock.grant(tid, perm);
+        // }
+        PageLock lock = this.pageLocks.computeIfAbsent(pid, k -> new PageLock());
+        WaitTransaction waitTransaction = new WaitTransaction(tid, pid, perm);
+        Long now = System.currentTimeMillis();
+        while(!lock.canGrant(tid, perm)){
+            synchronized(this){
+                if(System.currentTimeMillis() - now > MAX_TRANSACTION_TIME){
+                    System.out.println("Transaction too long " + tid.getId() + " " + pid);
+                    throw new TransactionAbortedException();
+                }
+
+                deadLockChecker.waits.add(waitTransaction);
+                TransactionId deadTid = deadLockChecker.isDeadLock();
+                if(deadTid != null){
+                    // 死锁
+                    deadLockChecker.waits.remove(waitTransaction);
+                    System.out.println("Dead lock");
+                    throw new TransactionAbortedException();
+                }
+
+                if(lock.canGrant(tid, perm)){
+                    break;
+                }
             }
+            try{
+                Thread.sleep(WAIT_EPOCH);
+            }catch(Exception e){
+                e.printStackTrace();
+            }
+        }
+        synchronized (this) {
+            deadLockChecker.waits.remove(waitTransaction);
             lock.grant(tid, perm);
         }
 
@@ -247,7 +393,7 @@ public class BufferPool {
      * @param tid the ID of the transaction requesting the unlock
      * @param commit a flag indicating whether we should commit or abort
      */
-    public void transactionComplete(TransactionId tid, boolean commit) {
+    public synchronized void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
         if(commit){
@@ -262,8 +408,7 @@ public class BufferPool {
                 Page pg = entry.getValue();
                 TransactionId dirtyTid = pg.isDirty();
                 if(dirtyTid != null && dirtyTid.equals(tid)){
-                    this.pageMap.remove(pid);
-                    this.lastAccessMap.remove(pid);
+                    deletePage(pid);
                 }
             }
         }
@@ -299,9 +444,9 @@ public class BufferPool {
         Iterator<Page> it = pg.iterator();
         synchronized(this){
             while(it.hasNext()){
-                if(this.pageMap.size() >= this.numPages){
-                    this.evictPage();
-                }
+                // if(this.pageMap.size() >= this.numPages){
+                //     this.evictPage();
+                // }
                 Page currentPage = it.next();
                 PageId pid = currentPage.getId();
                 currentPage.markDirty(true, tid);
@@ -343,6 +488,23 @@ public class BufferPool {
         }
     }
 
+    private void deletePage(PageId pid){
+        if(pid != null){
+            this.pageMap.remove(pid);
+            this.lastAccessMap.remove(pid);
+        }
+    }
+
+    public synchronized void removePage(PageId pid) {
+        try {
+            flushPage(pid);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+
     /**
      * Flush all dirty pages to disk.
      * NB: Be careful using this routine -- it writes dirty data to disk so will
@@ -351,9 +513,12 @@ public class BufferPool {
     public synchronized void flushAllPages() throws IOException {
         // some code goes here
         // not necessary for lab1
-        for (Map.Entry<PageId, Page> entry : pageMap.entrySet()) {
-            PageId pid = entry.getKey();
-            flushPage(pid);
+        while(!pageMap.isEmpty()){
+            try{
+                evict();
+            } catch (DbException e){
+                e.printStackTrace();
+            }
         }
     }
 
@@ -368,9 +533,10 @@ public class BufferPool {
     public synchronized void discardPage(PageId pid) {
         // some code goes here
         // not necessary for lab1
-        if(this.pageMap.contains(pid)){
-            this.pageMap.remove(pid);
-            this.lastAccessMap.remove(pid);
+        try{
+            flushPage(pid);
+        }catch (IOException e){
+            e.printStackTrace();
         }
     }
 
@@ -382,11 +548,21 @@ public class BufferPool {
         // some code goes here
         // not necessary for lab1
         Page page = this.pageMap.get(pid);
-        if((page != null) && (page.isDirty() != null)){
-            DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
-            file.writePage(page);
-            page.markDirty(false, null);
+        if(page == null){
+
         }
+        TransactionId tid = page.isDirty();
+        if((page != null) && (tid != null)){
+            DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
+            try{
+                file.writePage(page);
+            }catch(Exception e){
+                e.printStackTrace();
+            }
+            pageLocks.get(pid).release(tid);
+        }
+        page.markDirty(false, tid);
+        deletePage(pid);
     }
 
     /** Write all pages of the specified transaction to disk.
@@ -404,15 +580,9 @@ public class BufferPool {
         }
     }
 
-    /**
-     * Discards a page from the buffer pool.
-     * Flushes the page to disk to ensure dirty pages are updated on disk.
-     */
-    private synchronized  void evictPage() throws DbException {
-        // some code goes here
-        // not necessary for lab1
+    private PageId findLruId() throws DbException{
         if (lastAccessMap.isEmpty()) {
-            return;
+            return null;
         }
         PageId lruId = null;
         Long oldestTime = null;
@@ -428,15 +598,32 @@ public class BufferPool {
                 lruId = pageId;
             }
         }
-        // 如果有干净页(lruId非空)
-        if(lruId != null){
-            this.pageMap.remove(lruId);
-            this.lastAccessMap.remove(lruId);
-        }
-
-        // 都是脏页(lruId为空, 或者不为空(lruId为干净)但是有锁)
         if(lruId == null){
             throw new DbException("All pages are dirty\n");
+        }
+        return lruId;
+    }
+
+    /**
+     * Discards a page from the buffer pool.
+     * Flushes the page to disk to ensure dirty pages are updated on disk.
+     */
+    private synchronized  void evictPage() throws DbException {
+        // some code goes here
+        // not necessary for lab1
+
+        PageId lruId = findLruId();
+
+        // 如果有干净页(lruId非空)
+        if(lruId != null){
+            removePage(lruId);
+        }
+    }
+
+    private synchronized void evict() throws DbException{
+        PageId lruId = findAnyLruId();
+        if(lruId != null){
+            removePage(lruId);
         }
     }
 }

@@ -11,6 +11,7 @@ import simpledb.transaction.TransactionAbortedException;
 import simpledb.transaction.TransactionId;
 
 import java.io.IOException;
+import java.util.NoSuchElementException;
 
 /**
  * The delete operator. Delete reads tuples from its child operator and removes
@@ -86,8 +87,7 @@ public class Delete extends Operator {
             try{
                 Database.getBufferPool().deleteTuple(this.t, child.next());
                 count ++;
-            }catch(Exception e){
-
+            }catch(NoSuchElementException | IOException e){
             }
         }
         TupleDesc td = new TupleDesc(new Type[]{Type.INT_TYPE});

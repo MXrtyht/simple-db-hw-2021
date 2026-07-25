@@ -1,5 +1,8 @@
 package simpledb.execution;
 
+import java.io.IOException;
+import java.util.NoSuchElementException;
+
 import simpledb.common.Database;
 import simpledb.common.DbException;
 import simpledb.common.Type;
@@ -94,8 +97,8 @@ public class Insert extends Operator {
             try{
                 Database.getBufferPool().insertTuple(this.t, this.tableId, child.next());
                 count ++;
-            }catch(Exception e){
-
+            }catch(NoSuchElementException | IOException e){
+                e.printStackTrace();
             }
         }
         TupleDesc td = new TupleDesc(new Type[]{Type.INT_TYPE});
