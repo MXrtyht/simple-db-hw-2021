@@ -229,6 +229,7 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid) {
         // some code goes here
         // not necessary for lab1|lab2
+        transactionComplete(tid, true);
     }
 
     /** Return true if the specified transaction has a lock on the specified page */
@@ -249,6 +250,28 @@ public class BufferPool {
     public void transactionComplete(TransactionId tid, boolean commit) {
         // some code goes here
         // not necessary for lab1|lab2
+        if(commit){
+            try{
+                this.flushPages(tid);
+            }catch(Exception e){
+                e.printStackTrace();
+            }
+        }else{
+            for(Map.Entry<PageId, Page> entry : pageMap.entrySet()){
+                PageId pid = entry.getKey();
+                Page pg = entry.getValue();
+                TransactionId dirtyTid = pg.isDirty();
+                if(dirtyTid != null && dirtyTid.equals(tid)){
+                    this.pageMap.remove(pid);
+                    this.lastAccessMap.remove(pid);
+                }
+            }
+        }
+        for(Map.Entry<PageId, PageLock> lock: pageLocks.entrySet()){
+            if(lock.getValue().hasLock(tid)){
+                lock.getValue().release(tid);
+            }
+        }
     }
 
     /**
@@ -371,6 +394,14 @@ public class BufferPool {
     public synchronized  void flushPages(TransactionId tid) throws IOException {
         // some code goes here
         // not necessary for lab1|lab2
+        for (Map.Entry<PageId, Page> entry : pageMap.entrySet()) {
+            PageId pid = entry.getKey();
+            Page pg = entry.getValue();
+            TransactionId dirtyId = pg.isDirty();
+            if(dirtyId != null && dirtyId.equals(tid)){
+                flushPage(pid);
+            }
+        }
     }
 
     /**
@@ -389,21 +420,23 @@ public class BufferPool {
         for (Map.Entry<PageId, Long> entry : lastAccessMap.entrySet()) {
             PageId pageId = entry.getKey();
             Long timestamp = entry.getValue();
+
+            Page pg = this.pageMap.get(pageId);
             
-            if (oldestTime == null || timestamp < oldestTime) {
+            if ((pg.isDirty()==null) && (oldestTime == null || timestamp < oldestTime)) {
                 oldestTime = timestamp;
                 lruId = pageId;
             }
         }
-        Page page = this.pageMap.get(lruId);
-        if(page.isDirty() != null){
-            try{
-                this.flushPage(lruId);
-            }catch(Exception e){
-                return ;
-            }
+        // 如果有干净页(lruId非空)
+        if(lruId != null){
+            this.pageMap.remove(lruId);
+            this.lastAccessMap.remove(lruId);
         }
-        this.pageMap.remove(lruId);
-        this.lastAccessMap.remove(lruId);
+
+        // 都是脏页(lruId为空, 或者不为空(lruId为干净)但是有锁)
+        if(lruId == null){
+            throw new DbException("All pages are dirty\n");
+        }
     }
 }
