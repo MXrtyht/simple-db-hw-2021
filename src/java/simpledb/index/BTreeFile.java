@@ -192,7 +192,7 @@ public class BTreeFile implements DbFile {
 			return (BTreeLeafPage)getPage(tid, dirtypages, pid, perm);
 		}
 
-		BTreeInternalPage internalPage = (BTreeInternalPage) getPage(tid, dirtypages, pid, perm);
+		BTreeInternalPage internalPage = (BTreeInternalPage) getPage(tid, dirtypages, pid, Permissions.READ_ONLY);
 
 		// 处理f值为null时
 		if(f == null){
