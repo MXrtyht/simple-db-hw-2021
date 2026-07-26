@@ -205,7 +205,7 @@ public class BTreeFile implements DbFile {
 			BTreeEntry entry = it.next();
 			Field key = entry.getKey();
 			lastEntry = entry;
-			if(f.compare(Op.LESS_THAN, key)){
+			if(f.compare(Op.LESS_THAN_OR_EQ, key)){
 				return findLeafPage(tid, dirtypages, entry.getLeftChild(), perm, f);
 			}
 		}
@@ -261,8 +261,44 @@ public class BTreeFile implements DbFile {
 		// the new entry.  getParentWithEmtpySlots() will be useful here.  Don't forget to update
 		// the sibling pointers of all the affected leaf pages.  Return the page into which a 
 		// tuple with the given key field should be inserted.
-        return null;
+		BTreeLeafPage newPage = (BTreeLeafPage)this.getEmptyPage(tid, dirtypages, BTreePageId.LEAF);
 		
+		// 将原page后半部分的tuple给newPage
+		int newPageTupleNum = page.getNumTuples() / 2;
+		Iterator<Tuple> it = page.reverseIterator();
+		for(int i=0; i < newPageTupleNum && it.hasNext(); i++){
+			Tuple t = it.next();
+			page.deleteTuple(t);
+			newPage.insertTuple(t);
+		}
+
+		// 父节点插入新的entry
+		Tuple midTuple = it.next();
+		Field midTupleField = midTuple.getField(keyField);
+		BTreeInternalPage parentPage = getParentWithEmptySlots(tid, dirtypages, page.getParentId(), midTupleField);
+		BTreeEntry newEntry = new BTreeEntry(midTupleField, page.getId(), newPage.getId());
+		parentPage.insertEntry(newEntry);
+
+		// 更新叶节点的左右指针, 类似双向数组的插入
+		newPage.setLeftSiblingId(page.getId());
+		newPage.setRightSiblingId(page.getRightSiblingId());
+
+		if(page.getRightSiblingId() != null){
+			BTreeLeafPage nextLeafPage = (BTreeLeafPage) getPage(tid, dirtypages, page.getRightSiblingId(), Permissions.READ_WRITE);
+			nextLeafPage.setLeftSiblingId(newPage.getId());
+		}
+		page.setRightSiblingId(newPage.getId());
+
+		// 更新指向父节点的指针
+		updateParentPointer(tid, dirtypages, parentPage.getId(), page.getId());
+		updateParentPointer(tid, dirtypages, parentPage.getId(), newPage.getId());
+
+		// 判断插入在哪个页
+		if(field.compare(Op.LESS_THAN, midTupleField)){
+			return page;
+		}else{
+			return newPage;
+		}
 	}
 	
 	/**
@@ -299,7 +335,40 @@ public class BTreeFile implements DbFile {
 		// the parent pointers of all the children moving to the new page.  updateParentPointers()
 		// will be useful here.  Return the page into which an entry with the given key field
 		// should be inserted.
-		return null;
+
+		BTreeInternalPage newPage = (BTreeInternalPage) getEmptyPage(tid, dirtypages, BTreePageId.INTERNAL);
+
+		// 找一半
+		int newPageEnrtyNum = page.getNumEntries() / 2;
+		Iterator<BTreeEntry> it = page.reverseIterator();
+
+		for(int i=0; i<newPageEnrtyNum && it.hasNext(); i++){
+			BTreeEntry entry = it.next();
+			page.deleteKeyAndRightChild(entry);
+			newPage.insertEntry(entry);
+		}
+
+		// 找中间
+		BTreeEntry midEntry = it.next();
+		page.deleteKeyAndRightChild(midEntry);
+
+		// 设置中间的entry的孩子 左右分别是原page和新的page
+		midEntry.setLeftChild(page.getId());
+		midEntry.setRightChild(newPage.getId());
+
+		BTreeInternalPage parentPage = getParentWithEmptySlots(tid, dirtypages, page.getParentId(), midEntry.getKey());
+
+		parentPage.insertEntry(midEntry);
+
+		updateParentPointer(tid, dirtypages, parentPage.getId(), page.getId());
+		updateParentPointer(tid, dirtypages, parentPage.getId(), newPage.getId());
+		updateParentPointers(tid, dirtypages, newPage);
+
+		if(field.compare(Op.LESS_THAN, midEntry.getKey())){
+			return page;
+		}else{
+			return newPage;
+		}
 	}
 	
 	/**
@@ -373,7 +442,7 @@ public class BTreeFile implements DbFile {
 			p = (BTreePage) getPage(tid, dirtypages, child, Permissions.READ_WRITE);
 			p.setParentId(pid);
 		}
-
+ 
 	}
 	
 	/**

@@ -549,7 +549,8 @@ public class BufferPool {
         // not necessary for lab1
         Page page = this.pageMap.get(pid);
         if(page == null){
-
+            // 为空时直接返回 加上此通过Lab 5 Exercise 2
+            return;
         }
         TransactionId tid = page.isDirty();
         if((page != null) && (tid != null)){
