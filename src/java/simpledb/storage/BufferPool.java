@@ -413,7 +413,7 @@ public class BufferPool {
             }
         }
         for(Map.Entry<PageId, PageLock> lock: pageLocks.entrySet()){
-            if(lock.getValue().hasLock(tid)){
+            if(lock.getValue() != null && lock.getValue().hasLock(tid)){
                 lock.getValue().release(tid);
             }
         }
@@ -555,6 +555,10 @@ public class BufferPool {
         TransactionId tid = page.isDirty();
         if((page != null) && (tid != null)){
             DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
+
+            Database.getLogFile().logWrite(tid, page.getBeforeImage(), page);
+            Database.getLogFile().force();
+
             try{
                 file.writePage(page);
             }catch(Exception e){
@@ -577,6 +581,7 @@ public class BufferPool {
             TransactionId dirtyId = pg.isDirty();
             if(dirtyId != null && dirtyId.equals(tid)){
                 flushPage(pid);
+                pg.setBeforeImage();
             }
         }
     }

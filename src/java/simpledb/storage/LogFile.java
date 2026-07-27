@@ -460,6 +460,64 @@ public class LogFile {
             synchronized(this) {
                 preAppend();
                 // some code goes here
+                // 撤销事务 tid 所有已写入磁盘的修改
+                // 日志中该事务的每个 UPDATE 记录的 before-image写回到表文件里，覆盖掉 after-image
+                long pos = tidToFirstLogRecord.get(tid.getId());
+                raf.seek(pos);
+
+                List<Page> pages = new ArrayList<>();
+                while(true){
+                    try{
+                        int type = raf.readInt();
+                        long recordTid = raf.readLong();
+
+                        if(type == UPDATE_RECORD && recordTid == tid.getId()){
+                            Page before = readPageData(raf);
+
+                            readPageData(raf); // after image
+                            raf.readLong(); // startOffset
+
+                            pages.add(before);
+                        } else {
+                            switch (type) {
+                                case BEGIN_RECORD:
+                                case COMMIT_RECORD:
+                                case ABORT_RECORD:
+                                    raf.readLong();
+                                    break;
+                                case CHECKPOINT_RECORD:
+                                    int num = raf.readInt();
+                                    for(int i=0; i<num; i++){
+                                        raf.readLong();
+                                        raf.readLong();
+                                    }
+                                    raf.readLong();
+                                    break;
+                                case UPDATE_RECORD:
+                                    readPageData(raf);
+                                    readPageData(raf);
+                                    raf.readLong();
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                    } catch(IOException e){
+                        break;
+                    }
+                }
+
+                // 收集到后反向处理
+                for(int i = pages.size()-1; i >= 0; i--){
+                    Page page = pages.get(i);
+
+                    PageId pid = page.getId();
+                    Database.getBufferPool().discardPage(pid);
+                    DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
+                    file.writePage(page);
+                }
+                
+                this.print();
             }
         }
     }
