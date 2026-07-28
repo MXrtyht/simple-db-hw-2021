@@ -516,8 +516,8 @@ public class LogFile {
                     DbFile file = Database.getCatalog().getDatabaseFile(pid.getTableId());
                     file.writePage(page);
                 }
-                
-                this.print();
+
+                // this.print();
             }
         }
     }
@@ -545,8 +545,169 @@ public class LogFile {
             synchronized (this) {
                 recoveryUndecided = false;
                 // some code goes here
+                // REDO + UNDO
+
+                // REDO 重做 处理 checkpoint 之后的commit记录
+                Set<Long> committedTxs = new HashSet<>();
+                // UNDO 撤销 处理 checkpoint 期间的活跃事务 以及 checkpoint 之后才开始的事务
+                Set<Long> activeTxs = new HashSet<>();
+
+                raf.seek(0);
+                long checkPoint = raf.readLong();
+
+                // 当处于checkPoint期间, 找出在活跃的事务 放入activeTxs
+                if (checkPoint != -1) {
+                    raf.seek(checkPoint);
+                    int type = raf.readInt();
+                    raf.readLong(); // skip tid -1
+                    int num = raf.readInt();
+                    for (int i = 0; i < num; i++) {
+                        long transactionId = raf.readLong();
+                        raf.readLong(); // skip firstLogRecordOffset
+                        activeTxs.add(transactionId);
+                    }
+                    raf.readLong(); // skip checkpoint's startOffset
+                } else {
+                    raf.seek(8);
+                }
+
+                // 从上面结束的位置(可能是checkPoint结尾, 也可能是没有checkPoint,seek(8)从开头开始)
+                // 如果遇到BEGIN 说明是事务开始了, 那么先加入activeTxs
+                // 如果后续遇到了COMMIT, 说明这个事务提交了, 而数据库崩溃, 因此需要redo, 从activeTxs移出, 加入到committedTxs中
+                // 遇到UPDATE 直接跳过
+                // 遇到CHECK_POINT, 则用里面的数据来更新activeTxs, 因为CHECK_POINT里的数据 是写CHECK_POINT时的快照
+                try {
+                    while (true) {
+                        int recordType = raf.readInt();
+                        long recordTid = raf.readLong();
+
+                        switch (recordType) {
+                            case BEGIN_RECORD:
+                                activeTxs.add(recordTid);
+                                break;
+                            case COMMIT_RECORD:
+                                activeTxs.remove(recordTid);
+                                committedTxs.add(recordTid);
+                                break;
+                            case ABORT_RECORD:
+                                activeTxs.remove(recordTid);
+                                break;
+                            case UPDATE_RECORD:
+                                readPageData(raf);
+                                readPageData(raf);
+                                break;
+                            case CHECKPOINT_RECORD:
+                                int n = raf.readInt();
+                                for (int i = 0; i < n; i++) {
+                                    long tid = raf.readLong();
+                                    raf.readLong();
+                                    activeTxs.add(tid);
+                                }
+                                break;
+                        }
+                        raf.readLong(); // skip record's startOffset
+                    }
+                } catch (EOFException e) {
+                }
+
+                // REDO 对已提交事务用 after-image 重做
+                long redoStart = (checkPoint != -1) ? checkPoint : 8;
+                raf.seek(redoStart);
+
+                try {
+                    while (true) {
+                        int recordType = raf.readInt();
+                        long recordTid = raf.readLong();
+
+                        if(recordType == UPDATE_RECORD && committedTxs.contains(recordTid)){
+                            readPageData(raf); // skip before
+                            Page after = readPageData(raf);
+
+                            DbFile file = Database.getCatalog().getDatabaseFile(after.getId().getTableId());
+                            file.writePage(after);
+                            // 重启后bufferPool一般为空 但是保持和rollback风格一致
+                            Database.getBufferPool().discardPage(after.getId());
+
+                            raf.readLong(); // skip
+                        }else{
+                            switch (recordType) {
+                                case BEGIN_RECORD:
+                                case COMMIT_RECORD:
+                                case ABORT_RECORD:
+                                    raf.readLong();
+                                    break;
+                                case CHECKPOINT_RECORD:
+                                    int num = raf.readInt();
+                                    for(int i=0; i<num; i++){
+                                        raf.readLong();
+                                        raf.readLong();
+                                    }
+                                    raf.readLong();
+                                    break;
+                                case UPDATE_RECORD:
+                                    readPageData(raf);
+                                    readPageData(raf);
+                                    raf.readLong();
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                    }
+                } catch (EOFException e) {
+                    // REDO done
+                }
+
+                // UNDO (对未提交事务用 before-image 撤销) 先扫出未提交的事务 后面再反向处理
+                raf.seek(8);
+                List<Page> undoPages = new ArrayList<>();
+                try{
+                    while(true){
+                        int recordType = raf.readInt();
+                        long recordTid = raf.readLong();
+
+                        if(recordType == UPDATE_RECORD && activeTxs.contains(recordTid)){
+                            Page before = readPageData(raf);
+                            readPageData(raf); // skip after
+
+                            undoPages.add(before);
+                            raf.readLong(); // skip
+                        }else{
+                            switch (recordType) {
+                                case BEGIN_RECORD:
+                                case COMMIT_RECORD:
+                                case ABORT_RECORD:
+                                    raf.readLong();
+                                    break;
+                                case CHECKPOINT_RECORD:
+                                    int num = raf.readInt();
+                                    for(int i=0; i<num; i++){
+                                        raf.readLong();
+                                        raf.readLong();
+                                    }
+                                    raf.readLong();
+                                    break;
+                                case UPDATE_RECORD:
+                                    readPageData(raf);
+                                    readPageData(raf);
+                                    raf.readLong();
+                                    break;
+                                default:
+                                    break;
+                            }
+                        }
+                    }
+                }catch(EOFException e){
+
+                }
+                for(int i=undoPages.size()-1; i>=0; i--){
+                    Page pg = undoPages.get(i);
+                    DbFile file = Database.getCatalog().getDatabaseFile(pg.getId().getTableId());
+
+                    file.writePage(pg);
+                }
             }
-         }
+        }
     }
 
     /** Print out a human readable represenation of the log */
